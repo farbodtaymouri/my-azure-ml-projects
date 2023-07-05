@@ -40,4 +40,8 @@ fi
 
 
 
+### How to use it?
+>  ./setup.sh <RESOURCE_GROUP> <WORKSPACE_NAME>
 
+Example:
+>  ./setup.sh tempRG tempWS
