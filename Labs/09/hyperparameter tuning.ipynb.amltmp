@@ -1,0 +1,577 @@
+{
+  "cells": [
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "# Tune hyperparameters with a sweep job\n",
+        "\n",
+        "There are many machine learning algorithms that require hyperparameters (parameter values that influence training, but can't be determined from the training data itself). For example, when training a logistic regression model, you can use a regularization rate hyperparameter to counteract bias in the model; or when training a convolutional neural network, you can use hyperparameters like learning rate and batch size to control how weights are adjusted and how many data items are processed in a mini-batch respectively. The choice of hyperparameter values can significantly affect the performance of a trained model, or the time taken to train it; and often you need to try multiple combinations to find the optimal solution. \n",
+        "\n",
+        "## Before you start\n",
+        "\n",
+        "You'll need the latest version of the  **azureml-ai-ml** package to run the code in this notebook. Run the cell below to verify that it is installed.\n",
+        "\n",
+        "> **Note**:\n",
+        "> If the **azure-ai-ml** package is not installed, run `pip install azure-ai-ml` to install it."
+      ],
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "pip install azure-ai-ml"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "pip show azure-ai-ml"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Name: azure-ai-ml\r\nVersion: 1.8.0\r\nSummary: Microsoft Azure Machine Learning Client Library for Python\r\nHome-page: https://github.com/Azure/azure-sdk-for-python\r\nAuthor: Microsoft Corporation\r\nAuthor-email: azuresdkengsysadmins@microsoft.com\r\nLicense: MIT License\r\nLocation: /anaconda/envs/azureml_py38/lib/python3.8/site-packages\r\nRequires: strictyaml, colorama, azure-storage-file-datalake, pydash, pyyaml, tqdm, jsonschema, opencensus-ext-azure, marshmallow, azure-mgmt-core, typing-extensions, azure-storage-blob, azure-storage-file-share, azure-common, isodate, pyjwt, azure-core, msrest\r\nRequired-by: \r\nNote: you may need to restart the kernel to use updated packages.\n"
+        }
+      ],
+      "execution_count": 1,
+      "metadata": {
+        "gather": {
+          "logged": 1688950463331
+        }
+      }
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "## Connect to your workspace\n",
+        "\n",
+        "With the required SDK packages installed, now you're ready to connect to your workspace.\n",
+        "\n",
+        "To connect to a workspace, we need identifier parameters - a subscription ID, resource group name, and workspace name. Since you're working with a compute instance, managed by Azure Machine Learning, you can use the default values to connect to the workspace."
+      ],
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from azure.identity import DefaultAzureCredential, InteractiveBrowserCredential\n",
+        "from azure.ai.ml import MLClient\n",
+        "\n",
+        "try:\n",
+        "    credential = DefaultAzureCredential()\n",
+        "    # Check if given credential can get token successfully.\n",
+        "    credential.get_token(\"https://management.azure.com/.default\")\n",
+        "except Exception as ex:\n",
+        "    # Fall back to InteractiveBrowserCredential in case DefaultAzureCredential not work\n",
+        "    credential = InteractiveBrowserCredential()"
+      ],
+      "outputs": [],
+      "execution_count": 2,
+      "metadata": {
+        "gather": {
+          "logged": 1688950471744
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# Get a handle to workspace\n",
+        "ml_client = MLClient.from_config(credential=credential)"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stderr",
+          "text": "Found the config file in: /config.json\n"
+        }
+      ],
+      "execution_count": 3,
+      "metadata": {
+        "gather": {
+          "logged": 1688950481117
+        }
+      }
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "## Create the training script\n",
+        "Hyperparameter tuning is ideal when you want to train a machine learning models but vary the input parameters. You'll need to create a training script that expects an input parameter representing one of the algorithm's hyperparameters.\n",
+        "\n",
+        "Run the following cells to create the **src** folder and the training script.\n",
+        "\n",
+        "Note that the training script expects two input parameters:\n",
+        "\n",
+        "- `--training_data` which expects a string. You'll specify the path to a registered data asset as the input training data.\n",
+        "- `--reg_rate` which expects a number, but has a default value of `0.01`. You'll use this input parameter for hyperparameter tuning."
+      ],
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import os\n",
+        "\n",
+        "# create a folder for the script files\n",
+        "script_folder = 'src'\n",
+        "os.makedirs(script_folder, exist_ok=True)\n",
+        "print(script_folder, 'folder created')"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "src folder created\n"
+        }
+      ],
+      "execution_count": 4,
+      "metadata": {
+        "gather": {
+          "logged": 1688950540451
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "%%writefile $script_folder/train.py\n",
+        "# import libraries\n",
+        "import mlflow\n",
+        "import argparse\n",
+        "import pandas as pd\n",
+        "import numpy as np\n",
+        "from sklearn.model_selection import train_test_split\n",
+        "from sklearn.linear_model import LogisticRegression\n",
+        "from sklearn.metrics import roc_auc_score\n",
+        "from sklearn.metrics import roc_curve\n",
+        "import matplotlib.pyplot as plt\n",
+        "\n",
+        "def main(args):\n",
+        "    # read data\n",
+        "    df = get_data(args.training_data)\n",
+        "\n",
+        "    # split data\n",
+        "    X_train, X_test, y_train, y_test = split_data(df)\n",
+        "\n",
+        "    # train model\n",
+        "    model = train_model(args.reg_rate, X_train, X_test, y_train, y_test)\n",
+        "\n",
+        "    # evaluate model\n",
+        "    eval_model(model, X_test, y_test)\n",
+        "\n",
+        "# function that reads the data\n",
+        "def get_data(path):\n",
+        "    print(\"Reading data...\")\n",
+        "    df = pd.read_csv(path)\n",
+        "    \n",
+        "    return df\n",
+        "\n",
+        "# function that splits the data\n",
+        "def split_data(df):\n",
+        "    print(\"Splitting data...\")\n",
+        "    X, y = df[['Pregnancies','PlasmaGlucose','DiastolicBloodPressure','TricepsThickness',\n",
+        "    'SerumInsulin','BMI','DiabetesPedigree','Age']].values, df['Diabetic'].values\n",
+        "\n",
+        "    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.30, random_state=0)\n",
+        "\n",
+        "    return X_train, X_test, y_train, y_test\n",
+        "\n",
+        "# function that trains the model\n",
+        "def train_model(reg_rate, X_train, X_test, y_train, y_test):\n",
+        "    mlflow.log_param(\"Regularization rate\", reg_rate)\n",
+        "    print(\"Training model...\")\n",
+        "    model = LogisticRegression(C=1/reg_rate, solver=\"liblinear\").fit(X_train, y_train)\n",
+        "\n",
+        "    return model\n",
+        "\n",
+        "# function that evaluates the model\n",
+        "def eval_model(model, X_test, y_test):\n",
+        "    # calculate accuracy\n",
+        "    y_hat = model.predict(X_test)\n",
+        "    acc = np.average(y_hat == y_test)\n",
+        "    print('Accuracy:', acc)\n",
+        "    mlflow.log_metric(\"Accuracy\", acc)\n",
+        "\n",
+        "    # calculate AUC\n",
+        "    y_scores = model.predict_proba(X_test)\n",
+        "    auc = roc_auc_score(y_test,y_scores[:,1])\n",
+        "    print('AUC: ' + str(auc))\n",
+        "    mlflow.log_metric(\"AUC\", auc)\n",
+        "\n",
+        "    # plot ROC curve\n",
+        "    fpr, tpr, thresholds = roc_curve(y_test, y_scores[:,1])\n",
+        "    fig = plt.figure(figsize=(6, 4))\n",
+        "    # Plot the diagonal 50% line\n",
+        "    plt.plot([0, 1], [0, 1], 'k--')\n",
+        "    # Plot the FPR and TPR achieved by our model\n",
+        "    plt.plot(fpr, tpr)\n",
+        "    plt.xlabel('False Positive Rate')\n",
+        "    plt.ylabel('True Positive Rate')\n",
+        "    plt.title('ROC Curve')\n",
+        "    plt.savefig(\"ROC-Curve.png\")\n",
+        "    mlflow.log_artifact(\"ROC-Curve.png\")    \n",
+        "\n",
+        "def parse_args():\n",
+        "    # setup arg parser\n",
+        "    parser = argparse.ArgumentParser()\n",
+        "\n",
+        "    # add arguments\n",
+        "    parser.add_argument(\"--training_data\", dest='training_data',\n",
+        "                        type=str)\n",
+        "    parser.add_argument(\"--reg_rate\", dest='reg_rate',\n",
+        "                        type=float, default=0.01)\n",
+        "\n",
+        "    # parse args\n",
+        "    args = parser.parse_args()\n",
+        "\n",
+        "    # return args\n",
+        "    return args\n",
+        "\n",
+        "# run script\n",
+        "if __name__ == \"__main__\":\n",
+        "    # add space in logs\n",
+        "    print(\"\\n\\n\")\n",
+        "    print(\"*\" * 60)\n",
+        "\n",
+        "    # parse args\n",
+        "    args = parse_args()\n",
+        "\n",
+        "    # run main function\n",
+        "    main(args)\n",
+        "\n",
+        "    # add space in logs\n",
+        "    print(\"*\" * 60)\n",
+        "    print(\"\\n\\n\")\n"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Overwriting src/train.py\n"
+        }
+      ],
+      "execution_count": 5,
+      "metadata": {}
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "## Configure and run a command job\n",
+        "\n",
+        "Run the cell below to train a classification model to predict diabetes. The model is trained by running the **train\\.py** script that can be found in the **src** folder. It uses the registered `diabetes-data` data asset as the training data. \n",
+        "\n",
+        "- `code`: specifies the folder that includes the script to run.\n",
+        "- `command`: specifies what to run exactly.\n",
+        "- `environment`: specifies the necessary packages to be installed on the compute before running the command.\n",
+        "- `compute`: specifies the compute to use to run the command.\n",
+        "- `display_name`: the name of the individual job.\n",
+        "- `experiment_name`: the name of the experiment the job belongs to.\n",
+        "\n",
+        "Note that the command job only runs the training script once, with a regularization rate of `0.1`. Before you run a sweep job to tune hyperparameters, it's a best practice to test whether your script works as expected with a command job."
+      ],
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from azure.ai.ml import command, Input\n",
+        "from azure.ai.ml.constants import AssetTypes\n",
+        "\n",
+        "# configure job\n",
+        "\n",
+        "job = command(\n",
+        "    code=\"./src\",\n",
+        "    command=\"python train.py --training_data ${{inputs.diabetes_data}} --reg_rate ${{inputs.reg_rate}}\",\n",
+        "    inputs={\n",
+        "        \"diabetes_data\": Input(\n",
+        "            type=AssetTypes.URI_FILE, \n",
+        "            path=\"azureml:diabetes-local:1\"\n",
+        "            ),\n",
+        "        \"reg_rate\": 0.01,\n",
+        "    },\n",
+        "    environment=\"AzureML-sklearn-0.24-ubuntu18.04-py37-cpu@latest\",\n",
+        "    compute=\"farbodtaymouri1\",\n",
+        "    display_name=\"diabetes-train-mlflow\",\n",
+        "    experiment_name=\"diabetes-training\", \n",
+        "    tags={\"model_type\": \"LogisticRegression\"}\n",
+        "    )\n",
+        "\n",
+        "# submit job\n",
+        "returned_job = ml_client.create_or_update(job)\n",
+        "aml_url = returned_job.studio_url\n",
+        "print(\"Monitor your job at\", aml_url)"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stderr",
+          "text": "Class AutoDeleteSettingSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass AutoDeleteConditionSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass BaseAutoDeleteSettingSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass IntellectualPropertySchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass ProtectionLevelSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass BaseIntellectualPropertySchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\n"
+        },
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Monitor your job at https://ml.azure.com/runs/great_bear_ryvlmd8zxv?wsid=/subscriptions/2a21ade8-9d70-4d5a-a619-083b264d1d56/resourcegroups/mlcertificate/workspaces/ft_ml&tid=71f8feea-4caa-4230-a785-dca61147bceb\n"
+        }
+      ],
+      "execution_count": 6,
+      "metadata": {
+        "gather": {
+          "logged": 1688950631383
+        },
+        "jupyter": {
+          "outputs_hidden": false,
+          "source_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import pandas as pd\n",
+        "\n",
+        "df = pd.read_csv('azureml://subscriptions/2a21ade8-9d70-4d5a-a619-083b264d1d56/resourcegroups/MLCertificate/workspaces/FT_ML/datastores/workspaceblobstore/paths/LocalUpload/d52d15a0d7d1e95b90a03f146099424a/diabetes.csv')\n",
+        "df.head(10)"
+      ],
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "execution_count": 43,
+          "data": {
+            "text/html": "<div>\n<style scoped>\n    .dataframe tbody tr th:only-of-type {\n        vertical-align: middle;\n    }\n\n    .dataframe tbody tr th {\n        vertical-align: top;\n    }\n\n    .dataframe thead th {\n        text-align: right;\n    }\n</style>\n<table border=\"1\" class=\"dataframe\">\n  <thead>\n    <tr style=\"text-align: right;\">\n      <th></th>\n      <th>PatientID</th>\n      <th>Pregnancies</th>\n      <th>PlasmaGlucose</th>\n      <th>DiastolicBloodPressure</th>\n      <th>TricepsThickness</th>\n      <th>SerumInsulin</th>\n      <th>BMI</th>\n      <th>DiabetesPedigree</th>\n      <th>Age</th>\n      <th>Diabetic</th>\n    </tr>\n  </thead>\n  <tbody>\n    <tr>\n      <th>0</th>\n      <td>1354778</td>\n      <td>0</td>\n      <td>171</td>\n      <td>80</td>\n      <td>34</td>\n      <td>23</td>\n      <td>43.509726</td>\n      <td>1.213191</td>\n      <td>21</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>1</th>\n      <td>1147438</td>\n      <td>8</td>\n      <td>92</td>\n      <td>93</td>\n      <td>47</td>\n      <td>36</td>\n      <td>21.240576</td>\n      <td>0.158365</td>\n      <td>23</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>2</th>\n      <td>1640031</td>\n      <td>7</td>\n      <td>115</td>\n      <td>47</td>\n      <td>52</td>\n      <td>35</td>\n      <td>41.511523</td>\n      <td>0.079019</td>\n      <td>23</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>3</th>\n      <td>1883350</td>\n      <td>9</td>\n      <td>103</td>\n      <td>78</td>\n      <td>25</td>\n      <td>304</td>\n      <td>29.582192</td>\n      <td>1.282870</td>\n      <td>43</td>\n      <td>1</td>\n    </tr>\n    <tr>\n      <th>4</th>\n      <td>1424119</td>\n      <td>1</td>\n      <td>85</td>\n      <td>59</td>\n      <td>27</td>\n      <td>35</td>\n      <td>42.604536</td>\n      <td>0.549542</td>\n      <td>22</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>5</th>\n      <td>1619297</td>\n      <td>0</td>\n      <td>82</td>\n      <td>92</td>\n      <td>9</td>\n      <td>253</td>\n      <td>19.724160</td>\n      <td>0.103424</td>\n      <td>26</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>6</th>\n      <td>1660149</td>\n      <td>0</td>\n      <td>133</td>\n      <td>47</td>\n      <td>19</td>\n      <td>227</td>\n      <td>21.941357</td>\n      <td>0.174160</td>\n      <td>21</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>7</th>\n      <td>1458769</td>\n      <td>0</td>\n      <td>67</td>\n      <td>87</td>\n      <td>43</td>\n      <td>36</td>\n      <td>18.277723</td>\n      <td>0.236165</td>\n      <td>26</td>\n      <td>0</td>\n    </tr>\n    <tr>\n      <th>8</th>\n      <td>1201647</td>\n      <td>8</td>\n      <td>80</td>\n      <td>95</td>\n      <td>33</td>\n      <td>24</td>\n      <td>26.624929</td>\n      <td>0.443947</td>\n      <td>53</td>\n      <td>1</td>\n    </tr>\n    <tr>\n      <th>9</th>\n      <td>1403912</td>\n      <td>1</td>\n      <td>72</td>\n      <td>31</td>\n      <td>40</td>\n      <td>42</td>\n      <td>36.889576</td>\n      <td>0.103944</td>\n      <td>26</td>\n      <td>0</td>\n    </tr>\n  </tbody>\n</table>\n</div>",
+            "text/plain": "   PatientID  Pregnancies  PlasmaGlucose  DiastolicBloodPressure   \n0    1354778            0            171                      80  \\\n1    1147438            8             92                      93   \n2    1640031            7            115                      47   \n3    1883350            9            103                      78   \n4    1424119            1             85                      59   \n5    1619297            0             82                      92   \n6    1660149            0            133                      47   \n7    1458769            0             67                      87   \n8    1201647            8             80                      95   \n9    1403912            1             72                      31   \n\n   TricepsThickness  SerumInsulin        BMI  DiabetesPedigree  Age  Diabetic  \n0                34            23  43.509726          1.213191   21         0  \n1                47            36  21.240576          0.158365   23         0  \n2                52            35  41.511523          0.079019   23         0  \n3                25           304  29.582192          1.282870   43         1  \n4                27            35  42.604536          0.549542   22         0  \n5                 9           253  19.724160          0.103424   26         0  \n6                19           227  21.941357          0.174160   21         0  \n7                43            36  18.277723          0.236165   26         0  \n8                33            24  26.624929          0.443947   53         1  \n9                40            42  36.889576          0.103944   26         0  "
+          },
+          "metadata": {}
+        }
+      ],
+      "execution_count": 43,
+      "metadata": {
+        "gather": {
+          "logged": 1687848314401
+        }
+      }
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "## Define the search space\n",
+        "\n",
+        "When your command job has completed successfully, you can configure and run a sweep job. \n",
+        "\n",
+        "First, you'll need to specify the search space for your hyperparameter. To train three models, each with a different regularization rate (`0.01`, `0.1`, or `1`), you can define the search space with a `Choice` hyperparameter. "
+      ],
+      "metadata": {
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from azure.ai.ml.sweep import Choice\n",
+        "\n",
+        "command_job_for_sweep = job(\n",
+        "    reg_rate=Choice(values=[0.01, 0.1, 1]),\n",
+        ")"
+      ],
+      "outputs": [],
+      "execution_count": 7,
+      "metadata": {
+        "gather": {
+          "logged": 1688950657294
+        },
+        "jupyter": {
+          "outputs_hidden": false,
+          "source_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "## Configure and submit the sweep job\n",
+        "\n",
+        "You'll use the sweep function to do hyperparameter tuning on your training script. To configure a sweep job, you'll need to configure the following:\n",
+        "\n",
+        "- `compute`: Name of the compute target to execute the job on.\n",
+        "- `sampling_algorithm`: The hyperparameter sampling algorithm to use over the search space. Allowed values are `random`, `grid` and `bayesian`.\n",
+        "- `primary_metric`: The name of the primary metric reported by each trial job. The metric must be logged in the user's training script using `mlflow.log_metric()` with the same corresponding metric name.\n",
+        "- `goal`: The optimization goal of the `primary_metric`. The allowed values are `maximize` and `minimize`.\n",
+        "- `limits`: Limits for the sweep job. For example, the maximum amount of trials or models you want to train.\n",
+        "\n",
+        "Note that the command job is used as the base for the sweep job. The configuration for the command job will be reused by the sweep job."
+      ],
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# apply the sweep parameter to obtain the sweep_job\n",
+        "sweep_job = command_job_for_sweep.sweep(\n",
+        "    compute=\"farbodtaymouri1\",\n",
+        "    sampling_algorithm=\"grid\",\n",
+        "    primary_metric=\"training_accuracy_score\",\n",
+        "    goal=\"Maximize\",\n",
+        ")\n",
+        "\n",
+        "# set the name of the sweep job experiment\n",
+        "sweep_job.experiment_name=\"sweep-diabetes\"\n",
+        "\n",
+        "# define the limits for this sweep\n",
+        "sweep_job.set_limits(max_total_trials=4, max_concurrent_trials=2, timeout=7200)"
+      ],
+      "outputs": [],
+      "execution_count": 8,
+      "metadata": {
+        "gather": {
+          "logged": 1688950760833
+        },
+        "jupyter": {
+          "outputs_hidden": false,
+          "source_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "help(command_job_for_sweep.sweep)"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Help on method sweep in module azure.ai.ml.entities._builders.command:\n\nsweep(*, primary_metric: str, goal: str, sampling_algorithm: str = 'random', compute: Optional[str] = None, max_concurrent_trials: Optional[int] = None, max_total_trials: Optional[int] = None, timeout: Optional[int] = None, trial_timeout: Optional[int] = None, early_termination_policy: Union[azure.ai.ml.entities._job.sweep.early_termination_policy.EarlyTerminationPolicy, str, NoneType] = None, search_space: Optional[Dict[str, Union[azure.ai.ml.entities._job.sweep.search_space.Choice, azure.ai.ml.entities._job.sweep.search_space.LogNormal, azure.ai.ml.entities._job.sweep.search_space.LogUniform, azure.ai.ml.entities._job.sweep.search_space.Normal, azure.ai.ml.entities._job.sweep.search_space.QLogNormal, azure.ai.ml.entities._job.sweep.search_space.QLogUniform, azure.ai.ml.entities._job.sweep.search_space.QNormal, azure.ai.ml.entities._job.sweep.search_space.QUniform, azure.ai.ml.entities._job.sweep.search_space.Randint, azure.ai.ml.entities._job.sweep.search_space.Uniform]]] = None, identity: Union[azure.ai.ml.entities._credentials.ManagedIdentityConfiguration, azure.ai.ml.entities._credentials.AmlTokenConfiguration, azure.ai.ml.entities._credentials.UserIdentityConfiguration, NoneType] = None, queue_settings: Optional[azure.ai.ml.entities._job.queue_settings.QueueSettings] = None, job_tier: Optional[str] = None, priority: Optional[str] = None) -> azure.ai.ml.entities._builders.sweep.Sweep method of azure.ai.ml.entities._builders.command.Command instance\n    Turn the command into a sweep node with extra sweep run setting. The command component in current Command\n    node will be used as its trial component. A command node can sweep for multiple times, and the generated sweep\n    node will share the same trial component.\n    \n    :param primary_metric: primary metric of the sweep objective, AUC e.g. The metric must be logged in running\n        the trial component.\n    :type primary_metric: str\n    :param goal: goal of the sweep objective.\n    :type goal: str, valid values: maximize or minimize\n    :param sampling_algorithm: sampling algorithm to sample inside search space. Defaults to \"random\"\n    :type sampling_algorithm: str, valid values: random, grid or bayesian\n    :param compute: target compute to run the node. If not specified, compute of current node will be used.\n    :type compute: str\n    :param max_total_trials: maximum trials to run, will overwrite value in limits\n    :type max_total_trials: int\n    :param max_concurrent_trials: Sweep Job max concurrent trials.\n    :type max_concurrent_trials: int\n    :param max_total_trials: Sweep Job max total trials.\n    :type max_total_trials: int\n    :param timeout: The max run duration in seconds, after which the job will be cancelled.\n    :type timeout: int\n    :param trial_timeout: Sweep Job Trial timeout value in seconds.\n    :type trial_timeout: int\n    :param early_termination_policy: early termination policy of the sweep node:\n    :type early_termination_policy: Union[EarlyTerminationPolicy, str], valid values: bandit, median_stopping\n        or truncation_selection.\n    :param identity: Identity that training job will use while running on compute.\n    :type identity: Union[\n        ManagedIdentityConfiguration,\n        AmlTokenConfiguration,\n        UserIdentityConfiguration]\n    :param queue_settings: Queue settings for the job.\n    :type queue_settings: QueueSettings\n    :param job_tier: **Experimental** determines the job tier.\n    :type job_tier: str\n    :param priority: **Experimental** controls the priority on the compute.\n    :type priority: str\n    :return: A sweep node with component from current Command node as its trial component.\n    :rtype: Sweep\n\n"
+        }
+      ],
+      "execution_count": 71,
+      "metadata": {}
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "Run the following cell to submit the sweep job."
+      ],
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "returned_sweep_job = ml_client.create_or_update(sweep_job)\n",
+        "aml_url = returned_sweep_job.studio_url\n",
+        "print(\"Monitor your job at\", aml_url)"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Monitor your job at https://ml.azure.com/runs/sleepy_nose_fx3r8m8nz4?wsid=/subscriptions/2a21ade8-9d70-4d5a-a619-083b264d1d56/resourcegroups/mlcertificate/workspaces/ft_ml&tid=71f8feea-4caa-4230-a785-dca61147bceb\n"
+        }
+      ],
+      "execution_count": 9,
+      "metadata": {
+        "gather": {
+          "logged": 1688950773742
+        },
+        "jupyter": {
+          "outputs_hidden": false,
+          "source_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# Download best trial model output\n",
+        "ml_client.jobs.download(returned_sweep_job.name, output_name=\"model\")"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {}
+    },
+    {
+      "attachments": {},
+      "cell_type": "markdown",
+      "source": [
+        "When the job is completed, navigate to the job overview. The **Trials** tab will show all models that have been trained and how the `Accuracy` score differs for each regularization rate value you tried."
+      ],
+      "metadata": {}
+    }
+  ],
+  "metadata": {
+    "kernel_info": {
+      "name": "python38-azureml"
+    },
+    "kernelspec": {
+      "name": "python38-azureml",
+      "language": "python",
+      "display_name": "Python 3.8 - AzureML"
+    },
+    "language_info": {
+      "name": "python",
+      "version": "3.8.5",
+      "mimetype": "text/x-python",
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "pygments_lexer": "ipython3",
+      "nbconvert_exporter": "python",
+      "file_extension": ".py"
+    },
+    "microsoft": {
+      "host": {
+        "AzureML": {
+          "notebookHasBeenCompleted": true
+        }
+      },
+      "ms_spell_check": {
+        "ms_spell_check_language": "en"
+      }
+    },
+    "nteract": {
+      "version": "nteract-front-end@1.0.0"
+    },
+    "vscode": {
+      "interpreter": {
+        "hash": "f2b2cd046deda8eabef1e765a11d0ec9aa9bd1d31d56ce79c815a38c323e14ec"
+      }
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 2
+}
