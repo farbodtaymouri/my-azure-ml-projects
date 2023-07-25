@@ -56,6 +56,7 @@ def main(args):
 # function that reads the data
 def get_data(data_path):
 
+    # Read all csv files in the data directory
     all_files = glob.glob(data_path + "/*.csv")
     print('all_files in get-data(): ', all_files)
     df = pd.concat((pd.read_csv(f) for f in all_files), sort=False)
