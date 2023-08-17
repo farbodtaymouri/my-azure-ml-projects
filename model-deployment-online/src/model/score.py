@@ -1,0 +1,61 @@
+import json
+import joblib
+import numpy as np
+import os
+
+# called when the deployment is created or updated
+def init():
+    global model
+    # get the path to the registered model file and load it
+    # AZUREML_MODEL_DIR is an environment variable created during deployment.
+    # It is the path to the model folder (./azureml-models/$MODEL_NAME/$VERSION)
+    # Please provide your model's folder name if there is one
+    print(os.listdir(os.getenv('AZUREML_MODEL_DIR')))
+    model_path = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'model/model.pkl')
+    model = joblib.load(model_path)
+
+# called when a request is received
+def run(raw_data):
+    # get the input data as a numpy array
+    print(raw_data)
+    data = np.array(json.loads(raw_data)['input_data']['data'])
+    print(data, type(data))
+    # get a prediction from the model
+    predictions = model.predict(data)
+    # return the predictions as any JSON serializable format
+    return predictions.tolist()
+
+
+
+# if __name__ == '__main__':
+
+#     raw_data = {
+#     "data": {
+#         "columns": [
+#         "Pregnancies",
+#         "PlasmaGlucose",
+#         "DiastolicBloodPressure",
+#         "TricepsThickness",
+#         "SerumInsulin",
+#         "BMI",
+#         "DiabetesPedigree",
+#         "Age"
+#         ],
+#         "index": [1],
+#         "data": [
+#         [
+#         0,148,58,11,179,39.19207553,0.160829008,45
+#         ]
+#         ]
+#     }
+#     }
+
+#     # Json should be transformed to string before sending
+#     json_data = json.dumps(raw_data)
+#     json_data
+
+#     # set the environment variable 'AZUREML_MODEL_DIR' outside of deployment just for testing the script
+#     os.environ['AZUREML_MODEL_DIR'] = '/mnt/batch/tasks/shared/LS_root/mounts/clusters/farbodtaymouri2/code/my-azure-ml-projects/model-deployment/src'
+#     init()
+#     preds = run(raw_data=json_data)
+#     print(preds)

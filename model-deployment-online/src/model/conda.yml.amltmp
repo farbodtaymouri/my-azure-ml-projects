@@ -1,0 +1,13 @@
+
+name: basic-env-cpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.7
+  - scikit-learn
+  - pandas
+  - numpy
+  - matplotlib
+  - pip: #If not available in conda repo
+    - azureml-inference-server-http
+
