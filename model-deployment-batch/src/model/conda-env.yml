@@ -1,0 +1,13 @@
+
+name: basic-env-cpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pandas
+  - scikit-learn
+  - numpy
+  - matplotlib
+  - pip:
+      - azureml-core
+      - mlflow
